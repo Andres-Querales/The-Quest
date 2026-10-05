@@ -1672,6 +1672,71 @@ Tratamiento: Cefalosporinas"></textarea>
             }
 
             
+            // === SUBIR IMÁGENES AL STORAGE ===
+            async function uploadBase64ToStorage(base64Data, fileNamePrefix) {
+                if (!base64Data || typeof base64Data !== 'string') return base64Data;
+                if (base64Data.startsWith('http://') || base64Data.startsWith('https://')) return base64Data;
+                if (!base64Data.startsWith('data:image/')) return base64Data;
+
+                try {
+                    const client = getSupabaseClient();
+                    if (!client) return base64Data;
+
+                    const arr = base64Data.split(',');
+                    const mimeMatch = arr[0].match(/:(.*?);/);
+                    const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+                    const bstr = atob(arr[1]);
+                    let n = bstr.length;
+                    const u8arr = new Uint8Array(n);
+                    while (n--) { u8arr[n] = bstr.charCodeAt(n); }
+                    const blob = new Blob([u8arr], { type: mime });
+
+                    const ext = mime.includes('png') ? 'png' : 'jpg';
+                    const fileName = `${fileNamePrefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
+
+                    const { data, error } = await client.storage
+                        .from('quices')
+                        .upload(fileName, blob, { contentType: mime, upsert: false });
+
+                    if (error) {
+                        console.error('Error subiendo imagen:', error);
+                        return base64Data;
+                    }
+
+                    const { data: urlData } = client.storage
+                        .from('quices')
+                        .getPublicUrl(fileName);
+
+                    return urlData.publicUrl;
+                } catch (err) {
+                    console.error('Error procesando imagen:', err);
+                    return base64Data;
+                }
+            }
+
+            async function uploadQuizImagesToStorage(items, onProgress) {
+                const newItems = [];
+                let uploadedCount = 0;
+                const totalToUpload = (items || []).filter(it => it.image && it.image.startsWith('data:image/')).length;
+
+                for (const item of (items || [])) {
+                    const newItem = { ...item };
+                    if (item.image && item.image.startsWith('data:image/')) {
+                        try {
+                            const url = await uploadBase64ToStorage(item.image, 'lamina');
+                            newItem.image = url;
+                            uploadedCount++;
+                            if (onProgress) onProgress(uploadedCount, totalToUpload);
+                        } catch (e) {
+                            console.warn('No se pudo subir una imagen, se mantiene en base64:', e);
+                        }
+                    }
+                    newItems.push(newItem);
+                }
+                return newItems;
+            }
+
+
             // === SISTEMA DE MONITOREO EN TIEMPO REAL Y PRESENCIA EN VIVO ===
             let studentLiveActivity = {
                 activity_type: 'browsing', // 'quiz_easy', 'quiz_hard', 'atlas', 'results', 'browsing'
@@ -2779,16 +2844,23 @@ function generateSessionToken() {
                             return;
                         }
 
+                        btnUploadQuiz.disabled = true;
+                        btnUploadQuiz.textContent = 'SUBIENDO IMÁGENES...';
+
+                        const itemsWithUrls = await uploadQuizImagesToStorage(pendingAdminParsedQuiz.items, (actual, total) => {
+                            btnUploadQuiz.textContent = total > 0 ? `SUBIENDO IMÁGENES (${actual}/${total})...` : 'PUBLICANDO EN LA NUBE...';
+                        });
+
                         const officialQuiz = {
                             id: generateUUID(),
                             title: pendingAdminParsedQuiz.title,
                             author: pendingAdminParsedQuiz.author || 'Cátedra Sección 31',
                             is_community: false,
-                            items: pendingAdminParsedQuiz.items
+                            items: itemsWithUrls
                         };
 
-                        btnUploadQuiz.disabled = true;
                         btnUploadQuiz.textContent = 'PUBLICANDO EN LA NUBE...';
+
 
                         try {
                             const res = await safeSupabaseQuery(client => client.from('quizzes').insert([officialQuiz]), 15000);
@@ -3807,14 +3879,21 @@ function generateSessionToken() {
 
                         btnPublishCommunity.disabled = true;
 
-                        // FLUJO 1: GUARDAR CAMBIOS DE QUIZ EN EDICIÓN
+                        // FLUJO 1: GUARDAR CAMBIOS DE QUIZ EN EDICIÓN                        // FLUJO 1: GUARDAR CAMBIOS DE QUIZ EN EDICIÓN
                         if (state.editingQuizId) {
-                            btnPublishCommunity.textContent = 'GUARDANDO CAMBIOS...';
                             const isOfficial = state.editingQuizIsOfficial;
+                            
+                            btnPublishCommunity.textContent = 'SUBIENDO IMÁGENES...';
+                            const itemsWithUrls = await uploadQuizImagesToStorage(state.creatorItems, (actual, total) => {
+                                btnPublishCommunity.textContent = total > 0 ? `SUBIENDO IMÁGENES (${actual}/${total})...` : 'GUARDANDO CAMBIOS...';
+                            });
+                            
+                            btnPublishCommunity.textContent = 'GUARDANDO CAMBIOS...';
                             const updatePayload = {
                                 title: quizName,
-                                items: [...state.creatorItems]
+                                items: itemsWithUrls
                             };
+                           
 
                             try {
                                 const res = await safeSupabaseQuery(client => 
@@ -3863,14 +3942,21 @@ function generateSessionToken() {
                         }
 
                         // FLUJO 2: CREACIÓN NUEVA EN COMUNIDAD
-                        btnPublishCommunity.textContent = 'PUBLICANDO EN LA NUBE...';
+                                                
+                        btnPublishCommunity.textContent = 'SUBIENDO IMÁGENES...';
                         const currentAuthorName = state.currentUser ? (state.currentUser.nombre_completo || state.currentUser.name || 'Estudiante') : 'Estudiante';
+                        
+                        const itemsWithUrls = await uploadQuizImagesToStorage(state.creatorItems, (actual, total) => {
+                            btnPublishCommunity.textContent = total > 0 ? `SUBIENDO IMÁGENES (${actual}/${total})...` : 'PUBLICANDO EN LA NUBE...';
+                        });
+                        
+                        btnPublishCommunity.textContent = 'PUBLICANDO EN LA NUBE...';
                         const newQuiz = {
                             id: generateUUID(),
                             title: quizName,
                             author: currentAuthorName,
                             is_community: true,
-                            items: [...state.creatorItems]
+                            items: itemsWithUrls
                         };
 
                         try {
